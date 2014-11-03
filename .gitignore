@@ -1,0 +1,9 @@
+*.pyc
+*.~1~
+*.py~
+*.~
+*.swp
+
+.*
+!.gitignore
+*.egg-info

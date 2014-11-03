@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+# -*- encoding: utf-8 -*-
+################################################################################
+#
+# Copyright (c) 2009-2014 Alistek ( http://www.alistek.com ) 
+#               All Rights Reserved.
+#               General contacts <info@alistek.com>
+#
+# WARNING: This program as such is intended to be used by professional
+# programmers who take the whole responsability of assessing all potential
+# consequences resulting from its eventual inadequacies and bugs
+# End users who are looking for a ready-to-use solution with commercial
+# garantees and support are strongly adviced to contract a Free Software
+# Service Company
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 3
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+#
+################################################################################
+
+from argparse import ArgumentParser, _SubParsersAction
+from configparser import ConfigParser
+import sys
+from jsonrpc2 import JsonRpcApplication
+from wsgiref.simple_server import make_server
+from os import path, listdir, mkdir, stat, unlink, kill, remove
+from signal import SIGQUIT
+from threading import Thread, Event
+from time import time, sleep
+
+from aeroo_docs_fncs import OfficeService
+
+from daemonize import Daemonize
+import logging
+
+#### Prepare spool directory
+SPOOL_PATH = ''
+PRESERVE_FH = []
+
+conf = '''
+[start]
+interface = localhost
+port = 8989
+oo-server = localhost
+oo-port = 8100
+spool-directory = /tmp/aeroo-docs
+spool-expire = 1800
+log-file = /var/log/aeroo-docs/aeroo_docs.log
+pid-file = /tmp/aeroo-docs.pid
+[simple-auth]
+username = anonymous
+password = anonymous
+'''
+
+config = ConfigParser()
+config.read_string(conf)
+config.read('/etc/aeroo-docs.conf')
+conf = config['start']
+
+top_parser = ArgumentParser(add_help=False,
+                        description='Converts and merges documents.')
+
+top_parser.add_argument('-h', '--help', action='store_const', const=True,
+                        help='print this help and exit')
+top_parser.add_argument('-v', '--version', action='version',
+                        version='%(prog)s 1.0')
+
+start_parser = ArgumentParser(add_help=False)
+start_parser.add_argument('-c', '--config-file', type=str,
+                    help='Read configuration from file. If no file exists, \
+                    asks user if generic configuration file should be created \
+                    at the given location.')
+
+start_parser.add_argument('-i', '--interface', type=str,
+                    default=conf['interface'],
+                    help='Interface, this service will bind to and listen.\
+                          Default - %s' % conf['interface'])
+
+start_parser.add_argument('-p', '--port', type=int,
+                    default=conf['port'],
+                    help='TCP port for the service to listen to.\
+                          Default - %s' % conf['port'])
+
+start_parser.add_argument('-w', '--oo-server', type=str,
+                    default=conf['oo-server'],
+                    help='OpenOffice / LibreOffice server IP address or \
+                          hostname. Default - %s' % conf['oo-server'])
+
+start_parser.add_argument('-s', '--oo-port', type=str,
+                    default=conf['oo-port'],
+                    help='OpenOffice / LibreOffice server TCP port.\
+                          Default - %s' % conf['oo-port'])
+
+start_parser.add_argument('-d', '--spool-directory', type=str,
+                    default=conf['spool-directory'],
+                    help='Spool directory.\
+                          Default - %s' % conf['spool-directory'])
+                          
+start_parser.add_argument('-e', '--spool-expire', type=int,
+                    default=conf['spool-expire'],
+                    help='Expire interval for spool files, in seconds.\
+                          Default - %s' % conf['spool-expire'])
+                          
+start_parser.add_argument('-t', '--no-cleanup', action='store_const',
+                    const=True,
+                    help='Do not perform clean up for spool directory.')
+
+start_parser.add_argument('-n', '--no-daemon', action='store_const',
+                    const=True,
+                    help='Do not run as daemon.')
+                    
+start_parser.add_argument('-l', '--log-file', type=str,
+                    default=conf['log-file'],
+                    help='Log file. \
+                          Default - %s' % conf['log-file'])
+
+ap = start_parser.add_subparsers(help='Authentication Options:')
+sa_parser = ap.add_parser('--simple-auth', 
+                    help='Simple (username & password) authentication mode.')
+
+sa_parser.add_argument('-un', '--username', type=str,
+                    default=config['simple-auth']['username'],
+                    help='Username for the service. Use with --simple-auth \
+                          Default - %s' % config['simple-auth']['username'])
+
+sa_parser.add_argument('-pw', '--password', type=str,
+                    default=config['simple-auth']['password'],
+                    help='Password for the service. Use with --simple-auth \
+                          Default - %s' % config['simple-auth']['password'])
+
+pid_parser = ArgumentParser(add_help=False)
+pid_parser.add_argument('-f', '--pid-file', type=str,
+                    default=conf['pid-file'],
+                    help='PID file to be used for starting/stoping/restarting \
+                          a daemon. Default - %s' % conf['pid-file'])
+                    
+
+
+sp = top_parser.add_subparsers(help='Commands:')
+sp_start = sp.add_parser('start', parents=[start_parser, pid_parser], 
+                         help='Starts Aeroo DOCS daemon')
+sp_stop = sp.add_parser('stop', parents=[pid_parser],
+                         help='Stops Aeroo DOCS daemon')
+sp_restart = sp.add_parser('restart', parents=[start_parser, pid_parser],
+                         help='Restarts Aeroo DOCS daemon')
+
+def print_help(parser, is_top=True):
+    '''
+    Prints all the help.
+    '''
+    def leave_subs(tofilter):
+        '''
+        Retrieve subparsers from parser
+        '''
+        return [action for action in tofilter._actions 
+                if isinstance(action, _SubParsersAction)]
+        
+    if is_top:
+        print(parser.format_help())
+    # there will probably only be one subparser_action,
+    # but better save than sorry
+    for subparsers_action in leave_subs(parser):
+        # get all subparsers and print help
+        for choice, subparser in subparsers_action.choices.items():
+            if is_top:
+                print('='*79)
+            print("Argument: '{}'".format(choice))
+            print(subparser.format_help())
+            if leave_subs(subparser):
+                print_help(subparser, is_top=False)
+    
+
+def no_auth(username, password):
+    return True
+
+def simple_auth(username, password):
+    if args.username == username and args.password == password:
+        return True
+    else:
+        return False
+
+def main():
+    """
+    Main worker thread.
+    """
+    logger = logging.getLogger('main')
+    if not args.no_cleanup:
+        new_cleaner = CleanerThread(expire=args.spool_expire)
+        new_cleaner.setDaemon(True)
+        new_cleaner.start()
+    if hasattr(args, 'simple_auth') and args.simple_auth is None or True:
+        auth_type =  no_auth
+    else:
+        auth_type =  simple_auth
+    try:
+        oser = OfficeService(args.oo_server, args.oo_port, args.spool_directory,
+                             auth_type)
+    except Exception as e:
+        logger.info('...failed')
+        logger.warning(str(e))
+        return e
+    # following are the core RPC functions
+    interfaces = {
+                  'convert': oser.convert,
+                  'upload': oser.upload,
+                  'join': oser.join,
+                 }
+    
+    app = JsonRpcApplication(rpcs = interfaces)
+    http = None
+    try:
+        httpd = make_server(args.interface, args.port, app)
+    except OSError as e:
+        if e.errno == 98:
+            logger.info('...failed')
+            logger.warning('Address allready in use, %s:%s is occupied.' 
+                % (args.interface, args.port))
+            logger.warning("Seems like Aeroo DOCS allready running!")
+        sys.exit()
+    logger.info('...started')
+    if not args.no_daemon:
+        logger.removeHandler(stdout)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt as e:
+        logger.info('Aeroo DOCS process interrupted.')
+        sys.exit()
+
+
+##### Starts timer for cleaning up spool directory        
+class CleanerThread(Thread):
+    
+    def __init__(self, delay=60, expire=1800):
+        super(CleanerThread, self).__init__()
+        self.name = 'Cleaner thread'
+        self.delay = delay
+        self.expire = expire
+
+    def run(self):
+        while True:
+            files = listdir(args.spool_directory)
+            for fname in files:
+                testfile = SPOOL_PATH % fname
+                atribs = stat(testfile)
+                if int(time()) - atribs.st_mtime > self.expire:
+                    unlink(testfile)
+            sleep(self.delay)
+
+pid_file = '/tmp/aeroo-docs.pid'
+def start_daemon(args):
+    logger.info('Starting Aeroo DOCS process...')
+    #### Prepare spool directory
+    if not path.exists(args.spool_directory):
+        mkdir(args.spool_directory, mode=0o0700)
+    daemon = False
+    try:
+        if args.no_daemon:
+            main()
+        else:
+            daemon = Daemonize(app="aeroo_docs", pid=pid_file, action=main,
+                               keep_fds=PRESERVE_FH)
+    except Exception as e:
+        logger.info('...failed')
+        raise daemon
+        sys.exit()
+    if isinstance(daemon, Exception):
+        sys.exit()
+    daemon and daemon.start()
+
+def stop_daemon(args):
+    try:
+        with open(pid_file, "r") as tmpfile:
+            pid = int(tmpfile.read())
+    except FileNotFoundError as e:
+        logger.warning('Process allready stopped. Nothing to do...')
+        return None
+    tries = 0
+    while tries < 10:
+        if tries == 0:
+            logger.info('Stopping Aeroo DOCS process...')
+        try:
+            kill(pid, SIGQUIT)
+        except ProcessLookupError as e:
+            if tries == 0:
+                logger.warning('Not running...')
+            else:
+                logger.info('...stopped')
+            logger.info('Removing pid file...')
+            remove(pid_file)
+            return None
+        tries += 1
+        sleep(1)
+
+def restart_daemon(args):
+    stop_daemon(args)
+    start_daemon(args)
+
+sp_start.set_defaults(func=start_daemon)
+sp_stop.set_defaults(func=stop_daemon)
+sp_restart.set_defaults(func=restart_daemon)
+
+
+
+args = top_parser.parse_args()
+### HELP!
+if args.help:
+    print_help(top_parser)
+    sys.exit()
+
+### Check config file
+if hasattr(args, 'config_file') and args.config_file is not None:
+    if not path.exists(args.config_file):
+        input_var = input('No config file found %s. '\
+            'Do you want to create one? [Yes|No]: ' % args.config_file)
+        if input_var.capitalize() in ['Yes', 'Y']:
+            conf_dir = path.dirname(args.config_file)
+            if not path.exists(conf_dir):
+                mkdir(conf_dir, mode=0o0700)
+            try:
+                with open(args.config_file, 'w') as cf:
+                    config.write(cf)
+            except PermissionError as e:
+                print('Warning: Can not create configuration file ( %s ), '\
+                      'permission denied.' % args.config_file)
+                sys.exit()
+                
+if hasattr(args, 'spool_directory'):
+    SPOOL_PATH = args.spool_directory + '/%s'
+
+logger = logging.getLogger('main')
+logger.setLevel(logging.DEBUG)
+format = '%(asctime)s - %(threadName)s - %(levelname)s - %(message)s'
+formatter = logging.Formatter(format)
+if hasattr(args, 'log_file'):
+    if not path.exists(args.log_file):
+        log_dir = path.dirname(args.log_file)
+        if not path.exists(log_dir):
+            mkdir(log_dir, mode=0o0700)
+    filehandler = logging.FileHandler(args.log_file)
+    PRESERVE_FH.append(filehandler.stream.fileno())
+    filehandler.setLevel(logging.DEBUG)
+    filehandler.setFormatter(formatter)
+    logger.addHandler(filehandler)
+
+stdout = logging.StreamHandler(sys.stdout)
+stdout.setLevel(logging.DEBUG)
+mesformatter = logging.Formatter('%(message)s')
+stdout.setFormatter(mesformatter)
+logger.addHandler(stdout)
+
+args.func(args)
