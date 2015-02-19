@@ -27,18 +27,24 @@
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #
 ################################################################################
-from DocumentConverter import DocumentConverter, DocumentConversionException
-from jsonrpc2 import JsonRpcException
+import logging
 import base64
 from hashlib import md5
 from random import randint
 from os import path, rename, getpid
 from time import time, sleep
-import logging
+from jsonrpc2 import JsonRpcException
+from DocumentConverter import DocumentConverter, DocumentConversionException
 
 MAXINT = 9223372036854775807
 
-filters = {'pdf':'writer_pdf_Export', 'odt':'writer8', 'doc':'MS Word 97'}
+filters = {'pdf':'writer_pdf_Export',   # PDF - Portable Document Format
+           'odt':'writer8', #ODF Text Document
+           'ods':'calc8',   # ODF Spreadsheet
+           'doc':'MS Word 97',  # Microsoft Word 97/2000/XP
+           'xls':'MS Excel 97', # Microsoft Excel 97/2000/XP
+           'csv':'Text - txt - csv (StarCalc)', # Text CSV
+          }
 
 class AccessException(Exception):
     pass
@@ -58,9 +64,9 @@ class OfficeService():
         self.oo_port = oo_port
         self.spool_path = spool_dir + '/%s'
         self.auth = auth_type
-        self.init_conn()
+        self._init_conn()
     
-    def init_conn(self):
+    def _init_conn(self):
         logger = logging.getLogger('main')
         try:
             self.oservice = DocumentConverter(self.oo_host, self.oo_port)
@@ -68,20 +74,26 @@ class OfficeService():
             self.oservice = None
             logger.warning("Failed to initiate OpenOffice/LibreOffice connection.")
     
-    def conn_healthy(self):
-        if self.oservice is not None:
-            return True
+    def _conn_healthy(self):
+        if hasattr(self, 'oservice'):
+            if self.oservice is not None:
+                return True
+        else:
+            self.oservice = None
         logger = logging.getLogger('main')
         attempt = 0
         while self.oservice is None and attempt < 3:
             attempt += 1
-            self.init_conn()
+            self._init_conn()
             if self.oservice is not None:
                 return True
             sleep(3)
         message = 'Failed to initiate connection to OpenOffice/LibreOffice three times in a row.'
         logger.warning(message)
         raise NoOfficeConnection(message)
+    
+    def _chktime(self, start_time):
+        return '%s s' % str(round(time()-start_time, 6))
     
     def convert(self, data=False, identifier=False, in_mime=False, out_mime=False, username=None, password=None):
         logger = logging.getLogger('main')
@@ -92,19 +104,27 @@ class OfficeService():
         if data is not False:
             data = base64.b64decode(data)
         elif identifier is not False:
-            with open(self.spool_path % self._md5(str(identifier)), "r") as tmpfile:
-                data = tmpfile.read()
-            data = base64.b64decode(data)
+            data = _readFile(identifier)
         else:
             raise NoidentException('Wrong or no identifier.')
-        logger.debug("  read file %s" % str(time() - start_time))
-        self.conn_healthy()
-        self.oservice.putDocument(data)
-        logger.debug("  upload document to office %s" % str(time() - start_time))
-        conv_data = self.oservice.saveByStream(filters[out_mime or 'odt'])
-        logger.debug("  download converted document %s" % str(time() - start_time))
-        self.oservice.closeDocument()
-        logger.debug("  close document %s" % str(time() - start_time))
+        logger.debug("  read file %s" % self._chktime(start_time))
+        self._conn_healthy()
+        logger.debug("  connection test ok %s" % self._chktime(start_time))
+        infilter = filters.get(in_mime, False)
+        outfilter = filters.get(out_mime, False)
+        self.oservice.putDocument(data, filter_name=infilter, read_only=True)
+        logger.debug("  upload document to office %s" % self._chktime(start_time))
+        try:
+            conv_data = self.oservice.saveByStream(filter_name=outfilter)
+            logger.debug("  download converted document %s" % self._chktime(start_time))
+        except Exception as e:
+            logger.debug("  conversion failed %s Exception: %s" % (self._chktime(start_time), str(e)))
+            self.oservice.closeDocument()
+            logger.debug("  emergency close document %s" % self._chktime(start_time))
+            raise e
+        else:
+            self.oservice.closeDocument()
+            logger.debug("  close document %s" % self._chktime(start_time))
         return base64.b64encode(conv_data).decode('utf8')
 
     def _md5(self, data):
@@ -137,7 +157,7 @@ class OfficeService():
             fname = fname or self._md5(str(identifier))
             with open(self.spool_path % '_'+fname, "a") as tmpfile:
                 tmpfile.write(data)
-            logger.debug("  chunk finished %s" % str(time() - start_time))            
+            logger.debug("  chunk finished %s" % self._chktime(start_time))            
             if is_last:
                 rename(self.spool_path % '_'+fname, self.spool_path % fname)
                 logger.debug("  file finished")
@@ -154,30 +174,46 @@ class OfficeService():
             traceback.print_exception(exceptionType, exceptionValue,
             exceptionTraceback, limit=2, file=sys.stdout)
             
+    
+    def _readFile(self, ident):
+        with open(self.spool_path % self._md5(str(ident)), "r") as tmpfile:
+            data = tmpfile.read()
+        return base64.b64decode(data)
+    
+    def _readFiles(self, idents):
+        logger = logging.getLogger('main')
+        for ident in idents:
+            start_time = time()
+            data = self._readFile(ident)
+            logger.debug("    read next file: %s +%s" % (ident, self._chktime(start_time)))
+            yield data
+            
         
-    def join(self, idents, out_mime=False, username=None, password=None):
+    def join(self, idents, in_mime=False, out_mime=False, username=None, password=None):
         logger = logging.getLogger('main')
         logger.debug('Join %s identifiers: %s' % (str(len(idents)),str(idents)))
         if not self.auth(username, password):
             raise AccessException('Access denied.')
         start_time = time()
         ident = idents.pop(0)
-        with open(self.spool_path % self._md5(str(ident)), "r") as tmpfile:
-            data = tmpfile.read()
-        data = base64.b64decode(data)
+        data = self._readFile(ident)
+        logger.debug("  read first file %s" % self._chktime(start_time))
+        self._conn_healthy()
+        logger.debug("  connection test ok %s" % self._chktime(start_time))
         try:
-            self.conn_healthy()
-            self.oservice.putDocument(data)
-            data_list = []
-            for ident in idents:
-                with open(self.spool_path % self._md5(str(ident)), "r") as tmpfile:
-                    data = tmpfile.read()
-                data = base64.b64decode(data)
-                data_list.append(data)
-            self.oservice.joinDocuments(data_list)
-            result_data = self.oservice.saveByStream(filters[out_mime or 'odt'])
+            infilter = filters.get(in_mime, False) or 'writer8'
+            outfilter = filters.get(out_mime, False)
+            self.oservice.putDocument(data, filter_name=infilter, read_only=True)
+            logger.debug("  upload first document to office %s" % self._chktime(start_time))
+            self.oservice.appendDocuments(self._readFiles(idents), filter_name=infilter)
+            result_data = self.oservice.saveByStream(outfilter)
+        except Exception as e:
+            logger.debug("  conversion failed %s Exception: %s" % (self._chktime(start_time), str(e)))
             self.oservice.closeDocument()
-        except:
+            logger.debug("  emergency close document %s" % self._chktime(start_time))
+            raise e
+        else:
             self.oservice.closeDocument()
-        logger.debug("  join finished %s" % str(time() - start_time))
+            logger.debug("  close document %s" % self._chktime(start_time))
+        logger.debug("  join finished %s" % self._chktime(start_time))
         return base64.b64encode(result_data).decode('utf8')
