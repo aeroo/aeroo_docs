@@ -104,7 +104,7 @@ class OfficeService():
         if data is not False:
             data = base64.b64decode(data)
         elif identifier is not False:
-            data = _readFile(identifier)
+            data = self._readFile(identifier)
         else:
             raise NoidentException('Wrong or no identifier.')
         logger.debug("  read file %s" % self._chktime(start_time))
