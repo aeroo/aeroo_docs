@@ -1,0 +1,61 @@
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:          xvfb
+# Required-Start:    $network  
+# Required-Stop:     $network 
+# X-Start-Before:    ooo-xvfb
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start or stop xvfb service
+# Description:       Virtual Frame buffer Server of OpenOffice
+# Author:            Normunds Vilcans, Alistek SIA
+#                    
+### END INIT INFO
+
+VDISPLAY='89'
+XVFB=/usr/bin/Xvfb
+XVFB_ARGS=":$VDISPLAY -screen 0 800x600x8 -fbdir /var/run"
+PIDFILE=/var/run/xvfb.pid
+
+
+case "$1" in
+start)
+if [ -f $PIDFILE ]; then
+echo "Xvbf server has already started."
+sleep 3
+exit
+fi
+echo "Starting Xvbf server"
+$XVFB $XVFB_ARGS >/dev/null 2>&1 &
+touch $PIDFILE
+;;
+stop)
+if [ -f $PIDFILE ]; then
+echo "Stopping Xvbf server."
+killall $XVFB
+rm -f $PIDFILE
+exit
+fi
+echo "Xvbf server is not running."
+exit
+;;
+restart)
+echo "Restarting " $0
+$0 stop
+$0 start
+;;
+status)
+
+CHECKPID=`pidof Xvfb`
+if [ "$CHECKPID" ]; then
+	echo "Xvfb service is Up (pid:$CHECKPID)"
+else
+	echo "Xvfb service is not running"
+fi
+exit
+;;
+*)
+echo "Usage: $0 {start|stop|status}"
+exit 1
+esac
+exit 0 
