@@ -28,7 +28,7 @@ sleep 2
 exit
 fi
 echo "Starting OpenOffice headless server"
-$SOFFICE_PATH --nologo --nofirststartwizard --accept="socket,host=$ADDRESS,port=8100;urp" --display :$VDISPLAY & > /dev/null 2>&1
+$SOFFICE_PATH --nologo --nofirststartwizard --accept="socket,host=$ADDRESS,port=8100;urp" --display $VDISPLAY & > /dev/null 2>&1
 touch $PIDFILE
 ;;
 stop)
