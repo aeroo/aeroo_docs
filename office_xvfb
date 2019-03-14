@@ -43,7 +43,7 @@ exit
 ;;
 restart)
 echo "Restarting " $0
-killall -9 soffice && killall -9 soffice.bin
+killall -9 soffice ; killall -9 soffice.bin
 sleep 3
 $0 stop
 $0 start
