@@ -34,7 +34,7 @@ touch $PIDFILE
 stop)
 if [ -f $PIDFILE ]; then
 echo "Stopping OpenOffice headless server."
-killall -9 soffice && killall -9 soffice.bin
+killall -9 soffice ; killall -9 soffice.bin
 rm -f $PIDFILE
 exit
 fi
@@ -58,7 +58,7 @@ fi
 exit
 ;;
 *)
-echo "Usage: $0 {start|stop|status}"
+echo "Usage: $0 {start|stop|restart|status}"
 exit 1
 esac
 exit 0 
